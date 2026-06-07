@@ -42,18 +42,22 @@ void setup()
   // Load language setting from NVS (before display init)
   loadLanguage();
 
+  // Init I2C with defined pins and pull-up.
   // Request the ESP32 internal pull-up resistors on
-  pinMode(13, INPUT_PULLUP); 
-  pinMode(14, INPUT_PULLUP);
+  pinMode(I2C_SDA, INPUT_PULLUP); 
+  pinMode(I2C_SCL, INPUT_PULLUP);
   delay(5);
-    Serial.printf("Initializing Shared I2C Bus... ");
-  #if defined(I2C_SDA) && defined(I2C_SCL)
+
+  Serial.printf("Initializing Shared I2C Bus... ");
+  // Check if pins are defined (non-zero)
+  if (I2C_SDA && I2C_SCL) {
     Wire.begin(I2C_SDA, I2C_SCL);
     Serial.printf("Done. (SDA: %d, SCL: %d)\n", I2C_SDA, I2C_SCL);
-  #else
-    Wire.begin(); // Fallback to framework defaults (21/22) if undefined
+  } else {
+    // Fallback to framework defaults (21/22) if undefined
+    Wire.begin();
     Serial.println(F("Done. (Default Pins)"));
-  #endif
+  }
 
   // Start Display
   setupDisplay();

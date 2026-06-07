@@ -4,8 +4,8 @@
 #include <Arduino.h>
 
 // I2C Pins (ESP32-DEV)
-#define I2C_SDA 21 // GPIO 21
-#define I2C_SCL 22 // GPIO 22
+static const uint8_t I2C_SDA = 21; // GPIO 21
+static const uint8_t I2C_SCL = 22; // GPIO 22
 
 // NFC PN532 pins (ESP32-DEV)
 static const uint8_t PN532_IRQ = 32; // GPIO 32

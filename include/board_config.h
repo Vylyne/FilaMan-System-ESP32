@@ -39,6 +39,8 @@
 #endif
 
 // Shared pin references redeclared as extern to be defined in respective board headers
+extern const uint8_t I2C_SDA;
+extern const uint8_t I2C_SCL;
 extern const uint8_t PN532_IRQ;
 extern const uint8_t PN532_RESET;
 extern const uint8_t LOADCELL_DOUT_PIN;
