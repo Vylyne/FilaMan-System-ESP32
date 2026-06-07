@@ -6,4 +6,7 @@
 void initWiFi();
 void checkWiFiConnection();
 
+extern bool ethOn;
+bool networkConnected(); // returns ethOn || wifiOn
+
 #endif
