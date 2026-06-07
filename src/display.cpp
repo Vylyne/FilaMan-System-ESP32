@@ -103,8 +103,8 @@ DisplayPriority oledGetCurrentPriority() {
     return currentPriority;
 }
 void setupDisplay() {
-    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-        Serial.println(F("SSD1306 allocation failed"));
+    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS, true, false)) {
+        Serial.printf("SSD1306 allocation failed");
         for (;;); // Stoppe das Programm, wenn das Display nicht initialisiert werden kann
     }
     display.setTextColor(WHITE);

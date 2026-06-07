@@ -11,7 +11,8 @@
 #include "lang.h"
 
 //Adafruit_PN532 nfc(PN532_SCK, PN532_MISO, PN532_MOSI, PN532_SS);
-Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
+// Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
+Adafruit_PN532* nfc = nullptr; 
 
 TaskHandle_t RfidReaderTask;
 // AsyncWebServerRequest* volatile activeNfcWriteRequest = nullptr; // Removed
@@ -127,7 +128,7 @@ bool formatNdefTag() {
 
     // Schreibe die Initialisierungsnachricht auf die ersten Seiten
     for (int i = 0; i < sizeof(ndefInit); i += 4) {
-      if (!nfc.ntag2xx_WritePage(pageOffset + (i / 4), &ndefInit[i])) {
+      if (!nfc->ntag2xx_WritePage(pageOffset + (i / 4), &ndefInit[i])) {
           success = false;
           break;
       }
@@ -138,7 +139,7 @@ bool formatNdefTag() {
 {
   uint8_t buffer[4];
   memset(buffer, 0, 4);
-  nfc.ntag2xx_ReadPage(3, buffer);
+  nfc->ntag2xx_ReadPage(3, buffer);
   return buffer[2]*8;
 }
 
@@ -150,7 +151,7 @@ bool robustPageRead(uint8_t page, uint8_t* buffer) {
         esp_task_wdt_reset();
         yield();
 
-        if (nfc.ntag2xx_ReadPage(page, buffer)) {
+        if (nfc->ntag2xx_ReadPage(page, buffer)) {
             return true;
         }
 
@@ -163,7 +164,7 @@ bool robustPageRead(uint8_t page, uint8_t* buffer) {
             // Re-verify tag presence with quick check
             uint8_t uid[7];
             uint8_t uidLength;
-            if (!nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 100)) {
+            if (!nfc->readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 100)) {
                 Serial.println("Tag lost during read operation");
                 return false;
             }
@@ -179,7 +180,7 @@ String detectNtagType()
   uint8_t ccBuffer[4];
   memset(ccBuffer, 0, 4);
 
-  if (!nfc.ntag2xx_ReadPage(3, ccBuffer)) {
+  if (!nfc->ntag2xx_ReadPage(3, ccBuffer)) {
     Serial.println("Failed to read capability container");
     return "UNKNOWN";
   }
@@ -208,10 +209,10 @@ String detectNtagType()
 
   // Try to read page 41 (NTAG213 ends at page 39, so this should fail)
   uint8_t testBuffer[4];
-  bool canReadPage41 = nfc.ntag2xx_ReadPage(41, testBuffer);
+  bool canReadPage41 = nfc->ntag2xx_ReadPage(41, testBuffer);
 
   // Try to read page 130 (NTAG215 ends at page 129, so this should fail for NTAG213/215)
-  bool canReadPage130 = nfc.ntag2xx_ReadPage(130, testBuffer);
+  bool canReadPage130 = nfc->ntag2xx_ReadPage(130, testBuffer);
 
   if (dataAreaSize <= 180 && !canReadPage41) {
     tagType = "NTAG213";
@@ -312,7 +313,7 @@ bool initializeNdefStructure() {
     for (int i = 0; i < 8; i += 4) {
         memcpy(pageBuffer, &minimalNdef[i], 4);
 
-        if (!nfc.ntag2xx_WritePage(4 + (i / 4), pageBuffer)) {
+        if (!nfc->ntag2xx_WritePage(4 + (i / 4), pageBuffer)) {
             Serial.print("Fehler beim Initialisieren von Seite ");
             Serial.println(4 + (i / 4));
             return false;
@@ -385,7 +386,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
   uint8_t testBuffer[4] = {0x00, 0x00, 0x00, 0x00};
 
   // Test if we can actually read the max page
-  if (!nfc.ntag2xx_ReadPage(maxWritablePage, testBuffer)) {
+  if (!nfc->ntag2xx_ReadPage(maxWritablePage, testBuffer)) {
     Serial.print("WARNING: Cannot read declared max page ");
     Serial.println(maxWritablePage);
 
@@ -411,7 +412,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
       Serial.print(maxTestAttempts);
       Serial.print(")... ");
 
-      if (nfc.ntag2xx_ReadPage(midPage, testBuffer)) {
+      if (nfc->ntag2xx_ReadPage(midPage, testBuffer)) {
         Serial.println("✓");
         actualMaxPage = midPage;
         lowPage = midPage + 1; // Search higher
@@ -518,7 +519,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
 
   // Try to read capability container (which worked during detection)
   uint8_t ccTest[4];
-  bool ccReadable = nfc.ntag2xx_ReadPage(3, ccTest);
+  bool ccReadable = nfc->ntag2xx_ReadPage(3, ccTest);
   Serial.print("Capability Container (Seite 3) lesbar: ");
   Serial.println(ccReadable ? "✓" : "❌");
 
@@ -532,11 +533,11 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
     Serial.println("1. Neuinitialisierung des PN532...");
 
     // Reinitialize the PN532
-    nfc.begin();
+    nfc->begin();
     vTaskDelay(pdMS_TO_TICKS(500)); // Give it time to initialize
 
     // Check firmware version to ensure communication is working
-    uint32_t versiondata = nfc.getFirmwareVersion();
+    uint32_t versiondata = nfc->getFirmwareVersion();
     if (versiondata) {
       Serial.print("PN532 Firmware Version: 0x");
       Serial.println(versiondata, HEX);
@@ -553,7 +554,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
 
     // Step 2: Reconfigure SAM
     Serial.println("2. SAM-Konfiguration...");
-    nfc.SAMConfig();
+    nfc->SAMConfig();
     vTaskDelay(pdMS_TO_TICKS(200));
 
     // Step 3: Re-detect the tag
@@ -567,7 +568,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
       Serial.print(attempts + 1);
       Serial.print("/5... ");
 
-      if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 1000)) {
+      if (nfc->readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 1000)) {
         Serial.println("✓");
         tagRedetected = true;
         break;
@@ -593,7 +594,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
     Serial.println("4. Test der Grundfunktionalität...");
     vTaskDelay(pdMS_TO_TICKS(200)); // Give interface time to stabilize
 
-    ccReadable = nfc.ntag2xx_ReadPage(3, ccTest);
+    ccReadable = nfc->ntag2xx_ReadPage(3, ccTest);
     Serial.print("Capability Container nach Reset lesbar: ");
     Serial.println(ccReadable ? "✓" : "❌");
 
@@ -630,7 +631,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
   bool basicPagesReadable = true;
 
   for (uint8_t testPage = 0; testPage <= 6; testPage++) {
-    bool readable = nfc.ntag2xx_ReadPage(testPage, testData);
+    bool readable = nfc->ntag2xx_ReadPage(testPage, testData);
     Serial.print("Seite ");
     Serial.print(testPage);
     Serial.print(": ");
@@ -675,7 +676,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
   uint8_t originalPage[4]; // Store original content
 
   // First, read original content of test page
-  if (!nfc.ntag2xx_ReadPage(10, originalPage)) {
+  if (!nfc->ntag2xx_ReadPage(10, originalPage)) {
     Serial.println("FEHLER: Kann Testseite nicht lesen für Backup");
     oledDisplayText(tr(STR_TEST_READ_ERROR));
     oledSetPriority(DISPLAY_PRIORITY_WARNING, 3000);
@@ -694,7 +695,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
   Serial.println();
 
   // Perform write test
-  if (!nfc.ntag2xx_WritePage(10, testPage)) {
+  if (!nfc->ntag2xx_WritePage(10, testPage)) {
     Serial.println("FEHLER: Schreibtest fehlgeschlagen!");
     Serial.println("Tag ist möglicherweise schreibgeschützt oder defekt");
 
@@ -704,7 +705,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
     // Check if tag is still present
     uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };
     uint8_t uidLength;
-    bool tagStillPresent = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 1000);
+    bool tagStillPresent = nfc->readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 1000);
     Serial.print("Tag noch erkannt: ");
     Serial.println(tagStillPresent ? "✓" : "❌");
 
@@ -730,7 +731,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
   uint8_t readBack[4];
   vTaskDelay(pdMS_TO_TICKS(20)); // Wait for write to complete
 
-  if (!nfc.ntag2xx_ReadPage(10, readBack)) {
+  if (!nfc->ntag2xx_ReadPage(10, readBack)) {
     Serial.println("FEHLER: Kann Testdaten nicht zurücklesen!");
     oledDisplayText(tr(STR_TEST_VERIFY_FAIL));
     oledSetPriority(DISPLAY_PRIORITY_WARNING, 3000);
@@ -765,7 +766,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
 
   // Restore original content
   Serial.println("Stelle ursprünglichen Inhalt wieder her...");
-  if (!nfc.ntag2xx_WritePage(10, originalPage)) {
+  if (!nfc->ntag2xx_WritePage(10, originalPage)) {
     Serial.println("WARNUNG: Konnte ursprünglichen Inhalt nicht wiederherstellen!");
   } else {
     Serial.println("✓ Ursprünglicher Inhalt wiederhergestellt");
@@ -790,7 +791,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
   uint8_t ndefCheck[8];
   bool ndefVerified = true;
   for (uint8_t page = 4; page < 6; page++) {
-    if (!nfc.ntag2xx_ReadPage(page, &ndefCheck[(page-4)*4])) {
+    if (!nfc->ntag2xx_ReadPage(page, &ndefCheck[(page-4)*4])) {
       ndefVerified = false;
       break;
     }
@@ -821,7 +822,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
   uint8_t stabilityTest[4];
   bool interfaceStable = false;
   for (int attempts = 0; attempts < 3; attempts++) {
-    if (nfc.ntag2xx_ReadPage(4, stabilityTest)) {
+    if (nfc->ntag2xx_ReadPage(4, stabilityTest)) {
       Serial.print("Interface stability test ");
       Serial.print(attempts + 1);
       Serial.println("/3: ✓");
@@ -937,7 +938,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
     // Write page to tag with retry mechanism
     bool writeSuccess = false;
     for (int writeAttempt = 0; writeAttempt < 3; writeAttempt++) {
-      if (nfc.ntag2xx_WritePage(pageNumber, pageBuffer)) {
+      if (nfc->ntag2xx_WritePage(pageNumber, pageBuffer)) {
         writeSuccess = true;
         break;
       } else {
@@ -983,7 +984,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
     // Verification with retry mechanism
     bool verifySuccess = false;
     for (int verifyAttempt = 0; verifyAttempt < 3; verifyAttempt++) {
-      if (nfc.ntag2xx_ReadPage(pageNumber, verifyBuffer)) {
+      if (nfc->ntag2xx_ReadPage(pageNumber, verifyBuffer)) {
         bool writeMatches = true;
         for (int i = 0; i < bytesToWrite; i++) {
           if (verifyBuffer[i] != pageBuffer[i]) {
@@ -1084,7 +1085,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
     Serial.print(stabilityAttempt + 1);
     Serial.print("/5... ");
 
-    if (nfc.ntag2xx_ReadPage(3, postWriteTest)) { // Read capability container
+    if (nfc->ntag2xx_ReadPage(3, postWriteTest)) { // Read capability container
       Serial.println("✓");
       interfaceResponsive = true;
       break;
@@ -1098,7 +1099,7 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
         // Try to re-establish communication with a simple tag presence check
         uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };
         uint8_t uidLength;
-        bool tagStillPresent = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 1000);
+        bool tagStillPresent = nfc->readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 1000);
         Serial.print("Tag presence check: ");
         Serial.println(tagStillPresent ? "✓" : "❌");
 
@@ -1701,7 +1702,7 @@ void writeJsonToTag(void *parameter) {
       oledSetPriority(DISPLAY_PRIORITY_ACTION, 1500);
     }
 
-    success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 400);
+    success = nfc->readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 400);
 
     if (success) {
       for (uint8_t i = 0; i < uidLength; i++) {
@@ -1781,7 +1782,7 @@ void writeJsonToTag(void *parameter) {
           yield();
           esp_task_wdt_reset();
 
-          bool tagPresent = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 500);
+          bool tagPresent = nfc->readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 500);
 
           if (!tagPresent) {
             Serial.println("✓ Tag wurde entfernt - NFC bereit für nächsten Scan");
@@ -1816,7 +1817,7 @@ void writeJsonToTag(void *parameter) {
 
           // Use a safe read operation that doesn't depend on tag presence
           // This tests if the PN532 chip itself is responsive
-          uint32_t versiondata = nfc.getFirmwareVersion();
+          uint32_t versiondata = nfc->getFirmwareVersion();
           if (versiondata != 0) {
             Serial.println("✓");
             interfaceReady = true;
@@ -2002,7 +2003,7 @@ bool safeTagDetection(uint8_t* uid, uint8_t* uidLength) {
         yield();
 
         // Use short timeout to avoid blocking
-        bool success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, uidLength, SHORT_TIMEOUT);
+        bool success = nfc->readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, uidLength, SHORT_TIMEOUT);
 
         if (success) {
             Serial.printf("✓ Tag detected on attempt %d with %dms timeout\n", attempt + 1, SHORT_TIMEOUT);
@@ -2014,11 +2015,11 @@ bool safeTagDetection(uint8_t* uid, uint8_t* uidLength) {
 
         // Refresh RF field after failed attempt (but not on last attempt)
         if (attempt < MAX_ATTEMPTS - 1) {
-            nfc.SAMConfig();
+            nfc->SAMConfig();
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
-
+    
     return false;
 }
 
@@ -2228,10 +2229,13 @@ void scanRfidTask(void * parameter) {
 void startNfc() {
   nfcRequestMutex = xSemaphoreCreateMutex();
   oledShowProgressBar(4, NUM_SETUP_STEPS, DISPLAY_BOOT_TEXT, tr(STR_NFC_INIT));
-  nfc.begin();                                           // Beginne Kommunikation mit RFID Leser
+  // 2. Instantiate dynamically now that main.cpp has mapped Wire to 13 & 16
+  nfc = new Adafruit_PN532(PN532_IRQ, PN532_RESET, &Wire);
+
+  nfc->begin();                                           // Beginne Kommunikation mit RFID Leser
 
   delay(1000);
-  unsigned long versiondata = nfc.getFirmwareVersion();  // Lese Versionsnummer der Firmware aus
+  unsigned long versiondata = nfc->getFirmwareVersion();  // Lese Versionsnummer der Firmware aus
   if (! versiondata) {                                   // Wenn keine Antwort kommt
     Serial.println("Kann kein RFID Board finden !");            // Sende Text "Kann kein..." an seriellen Monitor
     oledDisplayText(tr(STR_NO_RFID_BOARD));
@@ -2242,12 +2246,12 @@ void startNfc() {
     Serial.print("Firmware ver. "); Serial.print((versiondata >> 16) & 0xFF, DEC);      // Monitor, wenn Antwort vom Board kommt
     Serial.print('.'); Serial.println((versiondata >> 8) & 0xFF, DEC);                  //
 
-    nfc.SAMConfig();
+    nfc->SAMConfig();
     // Set the max number of retry attempts to read from a card
     // This prevents us from waiting forever for a card, which is
     // the default behaviour of the PN532.
-    //nfc.setPassiveActivationRetries(0x7F);
-    //nfc.setPassiveActivationRetries(0xFF);
+    //nfc->setPassiveActivationRetries(0x7F);
+    //nfc->setPassiveActivationRetries(0xFF);
 
     BaseType_t result = xTaskCreatePinnedToCore(
       scanRfidTask, /* Function to implement the task */
