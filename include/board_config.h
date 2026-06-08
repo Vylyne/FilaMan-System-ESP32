@@ -38,9 +38,14 @@
     #error "No valid board target defined in platformio.ini! Ensure either -DESP32_DEV or -DOLIMEX_ESP32_POE is set."
 #endif
 
-// Shared pin references redeclared as extern to be defined in respective board headers
-extern const uint8_t I2C_SDA;
-extern const uint8_t I2C_SCL;
+// Automatically enable ethernet support if the board defines a PHY type
+#ifdef ETH_PHY_TYPE
+    #define HAS_ETHERNET
+#endif
+
+// // Shared pin references redeclared as extern to be defined in respective board headers
+// extern const uint8_t I2C_SDA;
+// extern const uint8_t I2C_SCL;
 extern const uint8_t PN532_IRQ;
 extern const uint8_t PN532_RESET;
 extern const uint8_t LOADCELL_DOUT_PIN;

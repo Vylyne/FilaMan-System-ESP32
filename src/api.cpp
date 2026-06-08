@@ -88,7 +88,7 @@ bool sendHeartbeat() {
     http.addHeader("Authorization", "Device " + filamanToken);
     http.addHeader("Connection", "keep-alive");  // Explizit Keep-Alive anfordern
     JsonDocument doc;
-    doc["ip_address"] = WiFi.localIP().toString();
+    doc["ip_address"] = getLocalIP();
     String payload;
     serializeJson(doc, payload);
     int httpCode = http.POST(payload);
