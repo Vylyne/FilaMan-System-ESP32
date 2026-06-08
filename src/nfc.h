@@ -4,9 +4,6 @@
 #include <Arduino.h>
 #include <ESPAsyncWebServer.h>
 
-// Board-specific pin definitions
-#include "board_config.h"
-
 typedef enum{
     NFC_IDLE,
     NFC_READING,
