@@ -17,7 +17,11 @@ bool wm_nonblocking = false;
 uint8_t wifiErrorCounter = 0;
 
 bool networkConnected() {
-    return ethOn || (WiFi.status() == WL_CONNECTED);
+    #ifdef HAS_ETHERNET
+      return ethOn || (WiFi.status() == WL_CONNECTED);
+    #else
+      return WiFi.status() == WL_CONNECTED;
+    #endif
 }
 
 void wifiSettings() {
