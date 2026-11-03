@@ -387,7 +387,10 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
   uint8_t mimeTypeLen = strlen(mimeType);
 
   // Calculate NDEF record size
-  uint8_t ndefRecordHeaderSize = 3; // Header byte + Type Length + Payload Length (short record)
+  // Short record (SR): 1-byte payload length, up to 255 bytes.
+  // Longer payloads need a normal record with a 4-byte payload length.
+  const bool shortRecord = payloadLen <= 255;
+  uint8_t ndefRecordHeaderSize = shortRecord ? 3 : 6; // Header byte + Type Length + Payload Length
   uint16_t ndefRecordSize = ndefRecordHeaderSize + mimeTypeLen + payloadLen;
 
   // Calculate TLV size - need to check if we need extended length format
@@ -804,9 +807,18 @@ uint8_t ntag2xx_WriteNDEF(const char *payload) {
   }
 
   // NDEF Record Header
-  tlvData[offset++] = 0xD2; // NDEF Record Header (TNF=0x2:MIME Media + SR + ME + MB)
-  tlvData[offset++] = mimeTypeLen; // Type Length
-  tlvData[offset++] = (uint8_t)payloadLen; // Payload Length (short record format)
+  if (shortRecord) {
+    tlvData[offset++] = 0xD2; // NDEF Record Header (TNF=0x2:MIME Media + SR + ME + MB)
+    tlvData[offset++] = mimeTypeLen; // Type Length
+    tlvData[offset++] = (uint8_t)payloadLen; // Payload Length (1 byte)
+  } else {
+    tlvData[offset++] = 0xC2; // NDEF Record Header (TNF=0x2:MIME Media + ME + MB, no SR)
+    tlvData[offset++] = mimeTypeLen; // Type Length
+    tlvData[offset++] = 0x00; // Payload Length (4 bytes, big-endian)
+    tlvData[offset++] = 0x00;
+    tlvData[offset++] = (uint8_t)(payloadLen >> 8);
+    tlvData[offset++] = (uint8_t)(payloadLen & 0xFF);
+  }
 
   // MIME Type
   memcpy(&tlvData[offset], mimeType, mimeTypeLen);
