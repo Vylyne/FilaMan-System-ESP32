@@ -125,6 +125,10 @@ unsigned long lastWifiCheckTime = 0;
 unsigned long lastTopRowUpdateTime = 0;
 
 uint8_t weightSend = 0;
+// Set when the weight queue was full or busy; the send is retried after a pause.
+bool weightEnqueueBlocked = false;
+unsigned long weightEnqueueBlockedAt = 0;
+const unsigned long WEIGHT_ENQUEUE_RETRY_MS = 3000;
 int16_t lastWeight = 0;
 
 // Button debounce variables
@@ -257,25 +261,32 @@ void loop() {
       lastWeight = weight;
 
       // Wenn ein Tag erkannt wurde und das Gewicht stabil ist (4+ seconds), an FilaMan senden
-      if (!scanRequestActive && weightCounterToApi > 3 && weightSend == 0 && nfcReaderState == NFC_READ_SUCCESS && tagProcessed == false)
+      if (!scanRequestActive && weightCounterToApi > 3 && weightSend == 0 && nfcReaderState == NFC_READ_SUCCESS && tagProcessed == false
+          && (!weightEnqueueBlocked || currentMillis - weightEnqueueBlockedAt >= WEIGHT_ENQUEUE_RETRY_MS))
       {
-        tagProcessed = true;
+        // Read tag identity and weight once so they are queued together.
+        // Bambu tags are sent by UUID only, without a spool id.
+        const bool bambu = isBambuTag;
+        const int sId = bambu ? 0 : activeSpoolId.toInt();
+        const String uuid = activeTagUuid;
+        const int16_t measured = weight;
 
-        // Check if it's a Bambu tag - if so, send only UUID without spoolId
-        if (isBambuTag) {
-          sendWeightAsync(0, activeTagUuid, weight);
-          Serial.println("Bambu weight queued for FilaMan (UUID only)");
+        WeightEnqueueResult result = sendWeightAsync(sId, uuid, measured);
+        if (result == WEIGHT_BUSY) {
+          // Queue full or locked: keep the scan open and try again shortly.
+          weightEnqueueBlocked = true;
+          weightEnqueueBlockedAt = currentMillis;
         } else {
-          // Normal NTAG: send spoolId + UUID
-          int sId = activeSpoolId.toInt();
-          sendWeightAsync(sId, activeTagUuid, weight);
-          Serial.println("Weight queued for FilaMan");
+          weightEnqueueBlocked = false;
+          tagProcessed = true;
+          weightSend = 1;
+          if (result == WEIGHT_QUEUED || result == WEIGHT_REPLACED) {
+            Serial.println(bambu ? "Bambu weight queued for FilaMan (UUID only)" : "Weight queued for FilaMan");
+            // Feedback to user. Delivery and retries run in the API task.
+            oledShowProgressBar(3, 4, tr(STR_SPOOL_TAG), tr(STR_SENDING));
+            oledSetPriority(DISPLAY_PRIORITY_ACTION, 2000);
+          }
         }
-        weightSend = 1;
-
-        // Feedback to user
-        oledShowProgressBar(3, 4, tr(STR_SPOOL_TAG), tr(STR_SENDING));
-        oledSetPriority(DISPLAY_PRIORITY_ACTION, 2000);
       }
 
       // Handle successful tag write

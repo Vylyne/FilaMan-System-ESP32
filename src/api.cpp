@@ -11,6 +11,7 @@
 #include "display.h"
 #include "lang.h"
 #include "wlan.h"
+#include "weight_delivery.h"
 
 volatile filamanApiStateType filamanApiState = API_IDLE;
 bool filamanConnected = false;
@@ -31,6 +32,11 @@ struct ApiRequest {
 #define MAX_API_QUEUE 10
 ApiRequest apiQueue[MAX_API_QUEUE];
 SemaphoreHandle_t queueMutex;
+
+// Weight measurements have their own queue: they stay queued until the
+// backend acknowledges them (see lib/WeightDelivery).
+static weightdelivery::DeliveryQueue weightQueue;
+static SemaphoreHandle_t weightMutex = nullptr;
 
 void saveFilamanConfig() {
     Preferences preferences;
@@ -112,12 +118,10 @@ bool sendHeartbeatWithRetry(int maxRetries = 2) {
     return false;
 }
 
-bool sendWeight(int spoolId, String tagUuid, float measuredWeight) {
-    Serial.printf("sendWeight: sending to API - spoolId=%d, tagUuid=%s, weight=%.1f\n", spoolId, tagUuid.c_str(), measuredWeight);
-    if (!checkFilamanRegistration() || !networkConnected()) {
-        Serial.println("ERROR: Not registered or network not connected");
-        return false;
-    }
+// Posts one weight measurement. Returns the HTTP status code, or a negative
+// HTTPClient error code. No display output; the caller decides what to show.
+int postWeight(int spoolId, const String& tagUuid, float measuredWeight, String* response) {
+    Serial.printf("postWeight: sending to API - spoolId=%d, tagUuid=%s, weight=%.1f\n", spoolId, tagUuid.c_str(), measuredWeight);
     HTTPClient http;
     http.setTimeout(10000);  // 10s Timeout
     http.setReuse(true);
@@ -137,30 +141,90 @@ bool sendWeight(int spoolId, String tagUuid, float measuredWeight) {
     Serial.printf("API payload: %s\n", payload.c_str());
     int httpCode = http.POST(payload);
     Serial.printf("API response code: %d\n", httpCode);
-
-    if (httpCode == 200) {
-        String response = http.getString();
-        JsonDocument responseDoc;
-        DeserializationError error = deserializeJson(responseDoc, response);
-        if (!error && responseDoc["remaining_weight_g"].is<float>()) {
-            int remaining = (int)responseDoc["remaining_weight_g"].as<float>();
-            oledShowRemainingWeight(remaining);
-            oledSetPriority(DISPLAY_PRIORITY_ACTION, 3000);
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            oledClearPriority();
-        }
-        http.end();
-        return true;
-    }
-    else {
-        oledShowProgressBar(1, 1, tr(STR_FAILURE), tr(STR_API_ERROR));
-        oledSetPriority(DISPLAY_PRIORITY_WARNING, 2000);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        oledClearPriority();
-    }
-
+    if (response && httpCode >= 200 && httpCode < 300) *response = http.getString();
     http.end();
-    return false;
+    return httpCode;
+}
+
+static weightdelivery::SendOutcome classifyWeightResponse(int httpCode) {
+    using weightdelivery::SendOutcome;
+    if (httpCode >= 200 && httpCode < 300) return SendOutcome::Success;
+    // Connection errors, timeouts, rate limiting and server errors may succeed later.
+    if (httpCode < 0 || httpCode == 408 || httpCode == 429 || httpCode >= 500) return SendOutcome::Transient;
+    // 400, 401, 403, 404, 422, ...: retrying the same request will not help.
+    return SendOutcome::Permanent;
+}
+
+static void showWeightApiError() {
+    oledShowProgressBar(1, 1, tr(STR_FAILURE), tr(STR_API_ERROR));
+    oledSetPriority(DISPLAY_PRIORITY_WARNING, 2000);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    oledClearPriority();
+}
+
+// Sends the next due weight measurement, if any, and records the result.
+static void processWeightQueue() {
+    using namespace weightdelivery;
+    if (!weightMutex) return;
+
+    Measurement m;
+    bool hasWork = false;
+    if (xSemaphoreTake(weightMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        hasWork = weightQueue.beginNext(millis(), m);
+        xSemaphoreGive(weightMutex);
+    }
+    if (!hasWork) return;
+
+    SendOutcome outcome;
+    int httpCode = 0;
+    String response;
+    if (!checkFilamanRegistration()) {
+        outcome = SendOutcome::Permanent;
+    } else if (!networkConnected()) {
+        outcome = SendOutcome::NoNetwork;
+    } else {
+        filamanApiState = API_TRANSMITTING;
+        httpCode = postWeight(m.spoolId, String(m.tagUuid.c_str()), m.weight, &response);
+        filamanApiState = API_IDLE;
+        outcome = classifyWeightResponse(httpCode);
+    }
+
+    // Always record the result, otherwise the entry would stay "in flight".
+    xSemaphoreTake(weightMutex, portMAX_DELAY);
+    Completion c = weightQueue.complete(m.seq, outcome, millis());
+    xSemaphoreGive(weightMutex);
+
+    switch (c.status) {
+        case DeliveryStatus::Confirmed: {
+            Serial.printf("Weight #%u confirmed (HTTP %d)\n", (unsigned)m.seq, httpCode);
+            JsonDocument responseDoc;
+            DeserializationError error = deserializeJson(responseDoc, response);
+            if (!error && responseDoc["remaining_weight_g"].is<float>()) {
+                int remaining = (int)responseDoc["remaining_weight_g"].as<float>();
+                oledShowRemainingWeight(remaining);
+                oledSetPriority(DISPLAY_PRIORITY_ACTION, 3000);
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                oledClearPriority();
+            }
+            break;
+        }
+        case DeliveryStatus::Pending:
+            Serial.printf("Weight #%u not delivered (HTTP %d, attempt %u), retry in %u ms\n",
+                          (unsigned)m.seq, httpCode, (unsigned)c.attempts, (unsigned)c.retryInMs);
+            // Show the error once, not on every retry.
+            if (c.attempts == 1) showWeightApiError();
+            break;
+        case DeliveryStatus::Failed:
+            Serial.printf("Weight #%u failed permanently (HTTP %d, registered=%d)\n",
+                          (unsigned)m.seq, httpCode, (int)checkFilamanRegistration());
+            showWeightApiError();
+            break;
+        case DeliveryStatus::Superseded:
+            Serial.printf("Weight #%u superseded by a newer measurement\n", (unsigned)m.seq);
+            break;
+        default:
+            break;
+    }
 }
 
 bool sendLocation(int spoolId, String spoolTagUuid, int locationId, String locationTagUuid) {
@@ -259,7 +323,6 @@ void filamanApiTask(void* pvParameters) {
                     break;
                 }
                 case API_REQUEST_HEARTBEAT: sendHeartbeatWithRetry(2); break;
-                case API_REQUEST_WEIGHT: sendWeight(req.id1, req.str1, req.val); break;
                 case API_REQUEST_LOCATE: sendLocation(req.id1, req.str1, req.id2, req.str2); break;
                 case API_REQUEST_RFID_RESULT: sendRfidResult(req.str1, req.id1, req.id2, req.bool1, req.str3, req.remainingWeight); break;
                 case API_REQUEST_TAG_DATA: sendTagData(req.str1); break;
@@ -267,6 +330,7 @@ void filamanApiTask(void* pvParameters) {
             }
             filamanApiState = API_IDLE;
         }
+        processWeightQueue();
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
@@ -316,29 +380,50 @@ void sendHeartbeatAsync() {
     }
 }
 
-void sendWeightAsync(int spoolId, String tagUuid, float weight) {
+WeightEnqueueResult sendWeightAsync(int spoolId, const String& tagUuid, float weight, uint32_t* ticket) {
+    using weightdelivery::EnqueueResult;
+    if (ticket) *ticket = 0;
     Serial.printf("sendWeightAsync: spoolId=%d, tagUuid=%s, weight=%.1f\n", spoolId, tagUuid.c_str(), weight);
     if (!checkFilamanRegistration()) {
         Serial.println("ERROR: Not registered with FilaMan, cannot send weight");
-        return;
+        return WEIGHT_NOT_REGISTERED;
     }
-    if (weight <= 0) {
-        Serial.println("ERROR: Weight is 0 or negative, cannot send");
-        return;
+    if (!weightMutex || xSemaphoreTake(weightMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        Serial.println("Weight queue busy");
+        return WEIGHT_BUSY;
     }
-    if (xSemaphoreTake(queueMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        for(int i=0; i<MAX_API_QUEUE; i++) if(!apiQueue[i].active) {
-            apiQueue[i].type = API_REQUEST_WEIGHT;
-            apiQueue[i].id1 = spoolId;
-            apiQueue[i].id2 = 0;
-            apiQueue[i].str1 = tagUuid;
-            apiQueue[i].str2 = "";
-            apiQueue[i].val = weight;
-            apiQueue[i].active = true;
-            Serial.printf("Weight queued for API (slot %d)\n", i);
-            break;
-        }
-        xSemaphoreGive(queueMutex);
+    EnqueueResult r = weightQueue.enqueue(spoolId, std::string(tagUuid.c_str()), weight, millis(), ticket);
+    size_t pending = weightQueue.pendingCount();
+    xSemaphoreGive(weightMutex);
+
+    switch (r) {
+        case EnqueueResult::Queued:
+            Serial.printf("Weight queued for API (%u pending)\n", (unsigned)pending);
+            return WEIGHT_QUEUED;
+        case EnqueueResult::Replaced:
+            Serial.printf("Weight replaced older pending value (%u pending)\n", (unsigned)pending);
+            return WEIGHT_REPLACED;
+        case EnqueueResult::Full:
+            Serial.println("Weight queue full");
+            return WEIGHT_BUSY;
+        default:
+            Serial.println("ERROR: Invalid weight or no spool id / tag UUID, cannot send");
+            return WEIGHT_INVALID;
+    }
+}
+
+WeightDeliveryStatus getWeightDeliveryStatus(uint32_t ticket) {
+    using weightdelivery::DeliveryStatus;
+    if (!weightMutex || xSemaphoreTake(weightMutex, pdMS_TO_TICKS(50)) != pdTRUE) return WEIGHT_STATUS_UNKNOWN;
+    DeliveryStatus st = weightQueue.status(ticket);
+    xSemaphoreGive(weightMutex);
+    switch (st) {
+        case DeliveryStatus::Pending:    return WEIGHT_STATUS_PENDING;
+        case DeliveryStatus::InFlight:   return WEIGHT_STATUS_IN_FLIGHT;
+        case DeliveryStatus::Confirmed:  return WEIGHT_STATUS_CONFIRMED;
+        case DeliveryStatus::Failed:     return WEIGHT_STATUS_FAILED;
+        case DeliveryStatus::Superseded: return WEIGHT_STATUS_SUPERSEDED;
+        default:                         return WEIGHT_STATUS_UNKNOWN;
     }
 }
 
@@ -398,6 +483,7 @@ bool initFilaman() {
     oledShowProgressBar(3, NUM_SETUP_STEPS, DISPLAY_BOOT_TEXT, tr(STR_API_INIT));
     loadFilamanConfig();
     queueMutex = xSemaphoreCreateMutex();
+    weightMutex = xSemaphoreCreateMutex();
     // Move to Core 1 (Hardware Core) to free up Core 0 for WiFi/Webserver
     // Set priority to 1 (same as Scale/NFC) to ensure fair scheduling
     xTaskCreatePinnedToCore(filamanApiTask, "FilaManApi", 6144, NULL, 1, NULL, 1);
