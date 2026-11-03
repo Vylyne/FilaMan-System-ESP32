@@ -213,120 +213,71 @@ bool robustPageRead(uint8_t page, uint8_t* buffer) {
     return false;
 }
 
-String detectNtagType()
+// NTAG2xx memory layout (NXP datasheets). CC byte 2 is the NDEF data area size / 8.
+// The last user page is followed by lock and config pages (CFG0/CFG1/PWD/PACK),
+// which must never be written: they can lock the tag or enable password protection.
+static const uint8_t CC_SIZE_NTAG213 = 0x12;  // user pages 4-39
+static const uint8_t CC_SIZE_NTAG215 = 0x3E;  // user pages 4-129
+static const uint8_t CC_SIZE_NTAG216 = 0x6D;  // user pages 4-225
+static const uint8_t SAFE_LAST_USER_PAGE = 39; // lowest user page limit of the family
+
+static bool readCapabilityContainer(uint8_t cc[4])
 {
-  // Read capability container from page 3 to determine exact NTAG type
-  uint8_t ccBuffer[4];
-  memset(ccBuffer, 0, 4);
-
-  if (!nfc.ntag2xx_ReadPage(3, ccBuffer)) {
+  memset(cc, 0, 4);
+  if (!nfc.ntag2xx_ReadPage(3, cc)) {
     Serial.println("Failed to read capability container");
-    return "UNKNOWN";
+    return false;
   }
-
-  // Also read configuration pages to get more info
-  uint8_t configBuffer[4];
-  memset(configBuffer, 0, 4);
-
-  Serial.print("Capability Container: ");
-  for (int i = 0; i < 4; i++) {
-    if (ccBuffer[i] < 0x10) Serial.print("0");
-    Serial.print(ccBuffer[i], HEX);
-    Serial.print(" ");
-  }
-  Serial.println();
-
-  // NTAG type detection based on capability container
-  // CC[2] contains the data area size in bytes / 8
-  uint16_t dataAreaSize = ccBuffer[2] * 8;
-
-  Serial.print("Data area size from CC: ");
-  Serial.println(dataAreaSize);
-
-  // Try to read different configuration pages to determine exact type
-  String tagType = "UNKNOWN";
-
-  // Try to read page 41 (NTAG213 ends at page 39, so this should fail)
-  uint8_t testBuffer[4];
-  bool canReadPage41 = nfc.ntag2xx_ReadPage(41, testBuffer);
-
-  // Try to read page 130 (NTAG215 ends at page 129, so this should fail for NTAG213/215)
-  bool canReadPage130 = nfc.ntag2xx_ReadPage(130, testBuffer);
-
-  if (dataAreaSize <= 180 && !canReadPage41) {
-    tagType = "NTAG213";
-    Serial.println("Detected: NTAG213 (cannot read beyond page 39)");
-  } else if (dataAreaSize <= 540 && canReadPage41 && !canReadPage130) {
-    tagType = "NTAG215";
-    Serial.println("Detected: NTAG215 (can read page 41, cannot read page 130)");
-  } else if (dataAreaSize <= 928 && canReadPage130) {
-    tagType = "NTAG216";
-    Serial.println("Detected: NTAG216 (can read page 130)");
-  } else {
-    // Fallback: use data area size from capability container
-    if (dataAreaSize <= 180) {
-      tagType = "NTAG213";
-      Serial.println("Fallback detection: NTAG213 based on data area size");
-    } else if (dataAreaSize <= 540) {
-      tagType = "NTAG215";
-      Serial.println("Fallback detection: NTAG215 based on data area size");
-    } else {
-      tagType = "NTAG216";
-      Serial.println("Fallback detection: NTAG216 based on data area size");
-    }
-  }
-
-  return tagType;
+  Serial.printf("Capability Container: %02X %02X %02X %02X\n", cc[0], cc[1], cc[2], cc[3]);
+  return true;
 }
 
-uint16_t getAvailableUserDataSize()
+// Returns the last page that may hold NDEF data, or 0 if the tag can't be written.
+// Only the capability container is used. Reading past the end of a tag to probe
+// its size made the tag drop out and let writes reach the config pages.
+//
+// The NDEF area is the size declared in the CC (8 bytes = 2 pages per unit),
+// which is also what the reader reads back. It is capped at the datasheet user
+// area for known NTAGs, and at page 39 for anything else.
+static uint16_t lastUserPageFromCc(const uint8_t cc[4])
 {
-  String tagType = detectNtagType();
-  uint16_t userDataSize = 0;
-
-  if (tagType == "NTAG213") {
-    // NTAG213: User data from page 4-39 (36 pages * 4 bytes = 144 bytes)
-    userDataSize = 144;
-    Serial.println("NTAG213 confirmed - 144 bytes user data available");
-  } else if (tagType == "NTAG215") {
-    // NTAG215: User data from page 4-129 (126 pages * 4 bytes = 504 bytes)
-    userDataSize = 504;
-    Serial.println("NTAG215 confirmed - 504 bytes user data available");
-  } else if (tagType == "NTAG216") {
-    // NTAG216: User data from page 4-225 (222 pages * 4 bytes = 888 bytes)
-    userDataSize = 888;
-    Serial.println("NTAG216 confirmed - 888 bytes user data available");
-  } else {
-    // Unknown tag type, use conservative estimate
-    uint16_t tagSize = readTagSize();
-    userDataSize = tagSize - 60; // Reserve 60 bytes for headers/config
-    Serial.print("Unknown NTAG type, using conservative estimate: ");
-    Serial.println(userDataSize);
+  if (cc[0] != 0xE1 || cc[2] == 0) return 0;  // not NDEF formatted
+  uint16_t limit;
+  switch (cc[2]) {
+    case CC_SIZE_NTAG213: limit = 39; break;
+    case CC_SIZE_NTAG215: limit = 129; break;
+    case CC_SIZE_NTAG216: limit = 225; break;
+    default: limit = SAFE_LAST_USER_PAGE; break;
   }
+  uint16_t declared = 3 + (uint16_t)cc[2] * 2;
+  return declared < limit ? declared : limit;
+}
 
-  return userDataSize;
+String detectNtagType()
+{
+  uint8_t cc[4];
+  if (!readCapabilityContainer(cc)) return "UNKNOWN";
+  switch (cc[2]) {
+    case CC_SIZE_NTAG213: return "NTAG213";
+    case CC_SIZE_NTAG215: return "NTAG215";
+    case CC_SIZE_NTAG216: return "NTAG216";
+    default: return "UNKNOWN";
+  }
 }
 
 uint16_t getMaxUserDataPages()
 {
-  String tagType = detectNtagType();
-  uint16_t maxPages = 0;
-
-  if (tagType == "NTAG213") {
-    maxPages = 39; // Pages 4-39 are user data
-  } else if (tagType == "NTAG215") {
-    maxPages = 129; // Pages 4-129 are user data
-  } else if (tagType == "NTAG216") {
-    maxPages = 225; // Pages 4-225 are user data
-  } else {
-    // Conservative fallback
-    maxPages = 39;
-    Serial.println("Unknown tag type, using NTAG213 page limit as fallback");
-  }
-
+  uint8_t cc[4];
+  uint16_t maxPages = readCapabilityContainer(cc) ? lastUserPageFromCc(cc) : 0;
   Serial.print("Maximum writable page: ");
   Serial.println(maxPages);
   return maxPages;
+}
+
+uint16_t getAvailableUserDataSize()
+{
+  uint16_t lastPage = getMaxUserDataPages();
+  return lastPage >= 4 ? (lastPage - 3) * 4 : 0;
 }
 
 bool initializeNdefStructure() {
@@ -407,82 +358,18 @@ bool clearUserDataArea() {
 }
 
 uint8_t ntag2xx_WriteNDEF(const char *payload) {
-  // Determine exact tag type and capabilities first
+  // Tag type and limits come from the capability container only (page 3).
   String tagType = detectNtagType();
-  uint16_t tagSize = readTagSize();
-  uint16_t availableUserData = getAvailableUserDataSize();
   uint16_t maxWritablePage = getMaxUserDataPages();
+  uint16_t availableUserData = maxWritablePage >= 4 ? (maxWritablePage - 3) * 4 : 0;
 
   Serial.println("=== NFC TAG ANALYSIS ===");
   Serial.print("Tag Type: ");Serial.println(tagType);
-  Serial.print("Total Tag Size: ");Serial.println(tagSize);
   Serial.print("Available User Data: ");Serial.println(availableUserData);
   Serial.print("Max Writable Page: ");Serial.println(maxWritablePage);
-  Serial.println("========================");
-
-  // Perform additional tag validation by testing write boundaries
-  Serial.println("=== TAG VALIDATION ===");
-  uint8_t testBuffer[4] = {0x00, 0x00, 0x00, 0x00};
-
-  // Test if we can actually read the max page
-  if (!nfc.ntag2xx_ReadPage(maxWritablePage, testBuffer)) {
-    Serial.print("WARNING: Cannot read declared max page ");
-    Serial.println(maxWritablePage);
-
-    // Find actual maximum writable page by testing backwards with optimized approach
-    uint16_t actualMaxPage = maxWritablePage;
-    Serial.println("Searching for actual maximum writable page...");
-
-    // Use binary search approach for faster page limit detection
-    uint16_t lowPage = 4;
-    uint16_t highPage = maxWritablePage;
-    uint16_t testAttempts = 0;
-    const uint16_t maxTestAttempts = 15; // Limit search attempts
-
-    while (lowPage <= highPage && testAttempts < maxTestAttempts) {
-      uint16_t midPage = (lowPage + highPage) / 2;
-      testAttempts++;
-
-      Serial.print("Testing page ");
-      Serial.print(midPage);
-      Serial.print(" (attempt ");
-      Serial.print(testAttempts);
-      Serial.print("/");
-      Serial.print(maxTestAttempts);
-      Serial.print(")... ");
-
-      if (nfc.ntag2xx_ReadPage(midPage, testBuffer)) {
-        Serial.println("✓");
-        actualMaxPage = midPage;
-        lowPage = midPage + 1; // Search higher
-      } else {
-        Serial.println("❌");
-        highPage = midPage - 1; // Search lower
-      }
-
-      // Small delay to prevent interface overload
-      vTaskDelay(pdMS_TO_TICKS(5));
-      yield();
-    }
-
-    Serial.print("Found actual max readable page: ");
-    Serial.println(actualMaxPage);
-    Serial.print("Search completed in ");
-    Serial.print(testAttempts);
-    Serial.println(" attempts");
-
-    maxWritablePage = actualMaxPage;
-  } else {
-    Serial.print("✓ Max page ");Serial.print(maxWritablePage);Serial.println(" is readable");
+  if (maxWritablePage < 4) {
+    Serial.println("Capability container unreadable or not NDEF formatted - refusing to write");
   }
-
-  // Calculate maximum available user data based on actual writable pages
-  uint16_t actualUserDataSize = (maxWritablePage - 3) * 4; // -3 because pages 0-3 are header
-  availableUserData = actualUserDataSize;
-
-  Serial.print("Actual available user data: ");
-  Serial.print(actualUserDataSize);
-  Serial.println(" bytes");
   Serial.println("========================");
 
   uint8_t pageBuffer[4] = {0, 0, 0, 0};
